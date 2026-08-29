@@ -771,8 +771,17 @@ int do_map (int fd_in)
             break;
         }
 
-        printf("%jd %jd\n", (intmax_t)start, (intmax_t)(end - start));
+        if (printf("%jd %jd\n", (intmax_t)start, (intmax_t)(end - start)) < 0) {
+            perror("ERROR: could not write map");
+            return 1;
+        }
         start = end;
+    }
+
+    //printf only buffers; a write error to a pipe/full disk surfaces on flush
+    if (fflush(stdout) != 0) {
+        perror("ERROR: could not write map");
+        return 1;
     }
 
     return 0;
