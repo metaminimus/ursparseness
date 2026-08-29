@@ -19,6 +19,11 @@
 //stderr write each floods the terminal and slows the transfer.
 static int g_quiet = 0;
 
+//set by -n / --dry-run: parse and validate the entire ursparse stream without
+//touching the output. do_hole / do_meat become no-ops and do_ursparse prints
+//a summary instead of reconstructing the file.
+static int g_dry_run = 0;
+
 //EINTR-safe wrappers: a signal must not abort a transfer mid-stream
 static ssize_t read_eintr(int fd, void* buf, size_t n)
 {
@@ -186,6 +191,12 @@ int do_meat(int fd_out, const char* buff, size_t sz, size_t* out_sz)
     if (!sz)     return -2;
     if (!out_sz) return -3;
 
+    if (g_dry_run) {
+        //dry run: count the meat as consumed, write nothing
+        *out_sz = sz;
+        return (int)sz;
+    }
+
     size_t written_bytes = 0;
 
     while (sz > 0) {
@@ -218,6 +229,9 @@ int do_meat(int fd_out, const char* buff, size_t sz, size_t* out_sz)
 //
 int do_hole(int fd_out, off_t offset)
 {
+    if (g_dry_run)
+        return 0;   //dry run: nothing is written, so nothing to seek over
+
     off_t r = lseek(fd_out, offset, SEEK_SET);
     if ((off_t)-1 == r) {
         perror("ERROR: could not write hole to output file");
@@ -236,6 +250,15 @@ enum ursparse_state {
     PARSE_MEAT,
 };
 
+//accounting that spans the whole stream, not just one segment: it survives the
+//per-segment reset. prev_end also drives the overlap check; the other two are
+//for the dry-run summary.
+struct ursparse_totals {
+    off_t prev_end;     //offset+length of the last completed segment
+    off_t data_bytes;   //sum of every segment length seen so far
+    off_t segments;     //number of segments completed so far
+};
+
 struct ursparse_state_data {
     struct ursparse ursparse;
     enum ursparse_state state;
@@ -243,17 +266,15 @@ struct ursparse_state_data {
     //cleared (with the rest of the struct) when a segment completes.
     //lets the caller tell "cut mid-segment" from "clean end + trailing space"
     int seg_started;
-    //offset+length of the last completed segment; segments must not move
-    //backwards into already-written data. survives the per-segment reset.
-    off_t prev_end;
+    struct ursparse_totals totals;
 };
 
-//clears the per-segment parse state for the next segment, keeping prev_end
+//clears the per-segment parse state for the next segment, keeping the totals
 static void reset_segment(struct ursparse_state_data* data)
 {
-    off_t prev_end = data->prev_end;
+    struct ursparse_totals totals = data->totals;
     memset(data, 0, sizeof(*data));
-    data->prev_end = prev_end;
+    data->totals = totals;
 }
 
 //parses ursparse line
@@ -370,10 +391,10 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         //segments must march forward: a segment that starts inside data an
         //earlier segment already wrote would overwrite it (and turn an
         //intended hole into data)
-        if (off < data->prev_end) {
+        if (off < data->totals.prev_end) {
             fprintf(stderr,
                 "ERROR: segment offset %jd overlaps earlier data ending at %jd\n",
-                (intmax_t)off, (intmax_t)data->prev_end);
+                (intmax_t)off, (intmax_t)data->totals.prev_end);
             data->state = PARSE_ERROR;
             return -10;
         }
@@ -390,7 +411,10 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         }
 
         //new high-water mark, clamped so off+len can't overflow off_t
-        data->prev_end = (len > OFF_MAX - off) ? OFF_MAX : off + len;
+        data->totals.prev_end = (len > OFF_MAX - off) ? OFF_MAX : off + len;
+        //non-overlapping segments within [0, OFF_MAX] can't sum past OFF_MAX
+        data->totals.data_bytes += len;
+        data->totals.segments   += 1;
 
         if (!g_quiet)
             fprintf(stderr, "INFO: processing segment %jd %jd\n",
@@ -462,23 +486,26 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
 
 int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
 {
-    //input is a sequential ursparse stream (pipe-friendly, no seek needed)
-    //output must be seekable so holes can be recreated via lseek
-    if (lseek(fd_out, 0, SEEK_CUR) == -1) {
-        perror("ERROR: output file is not seekable");
-        return 1;
-    }
+    //a dry run never touches fd_out, so its seekability / append mode is moot
+    if (!g_dry_run) {
+        //input is a sequential ursparse stream (pipe-friendly, no seek needed)
+        //output must be seekable so holes can be recreated via lseek
+        if (lseek(fd_out, 0, SEEK_CUR) == -1) {
+            perror("ERROR: output file is not seekable");
+            return 1;
+        }
 
-    //O_APPEND forces every write to EOF regardless of lseek, so do_hole's
-    //seeks would be silently ignored and every segment concatenated
-    int flags = fcntl(fd_out, F_GETFL);
-    if (flags == -1) {
-        perror("ERROR: could not query output file");
-        return 1;
-    }
-    if (flags & O_APPEND) {
-        fprintf(stderr, "ERROR: output file is in append mode; holes cannot be recreated (redirect with > not >>)\n");
-        return 1;
+        //O_APPEND forces every write to EOF regardless of lseek, so do_hole's
+        //seeks would be silently ignored and every segment concatenated
+        int flags = fcntl(fd_out, F_GETFL);
+        if (flags == -1) {
+            perror("ERROR: could not query output file");
+            return 1;
+        }
+        if (flags & O_APPEND) {
+            fprintf(stderr, "ERROR: output file is in append mode; holes cannot be recreated (redirect with > not >>)\n");
+            return 1;
+        }
     }
 
     char* read_buff = malloc(blk_sz);
@@ -527,6 +554,14 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
     }
 
     free(read_buff);
+
+    if (g_dry_run)
+        printf("dry run OK: %jd segment(s), %jd data byte(s), "
+               "reconstructed size %jd byte(s)\n",
+               (intmax_t)data.totals.segments,
+               (intmax_t)data.totals.data_bytes,
+               (intmax_t)data.totals.prev_end);
+
     return 0;
 }
 
@@ -818,6 +853,7 @@ int usage(const char* name)
     fprintf(stderr, "       -q,    --quiet     do not log every segment to stderr as it is processed\n");
     fprintf(stderr, "       -m,    --map       shows map of data blocks for sparse input file\n");
     fprintf(stderr, "       -u,    --ursparse  reads ursparse input file and writes sparse file to output (default option)\n");
+    fprintf(stderr, "       -n,    --dry-run   validate the -u input stream without writing output\n");
     fprintf(stderr, "       -s,    --sparse    reads sparse input file and writes ursparse format to output file\n");
     fprintf(stderr, "       -s00               treat data blocks that are all 0x00 as holes\n");
     fprintf(stderr, "       -sFF               treat data blocks that are all 0xFF as holes\n");
@@ -930,6 +966,7 @@ int main(int argc, const char* argv[])
             else if (!strcmp("ursparse", opt)) action = URSPARSE;
             else if (!strcmp("sparse",   opt)) action = SPARSE;
             else if (!strcmp("quiet",    opt)) g_quiet = 1;
+            else if (!strcmp("dry-run",  opt)) g_dry_run = 1;
             else if (!strncmp("blocksize=", opt, sizeof("blocksize=")-1)) {
                 block_size = parse_block_size(opt + sizeof("blocksize=")-1);
                 block_size_given = 1;
@@ -958,6 +995,7 @@ int main(int argc, const char* argv[])
             else if (!strcmp("u", arg+1)) action = URSPARSE;
             else if (!strcmp("s", arg+1)) action = SPARSE;
             else if (!strcmp("q", arg+1)) g_quiet = 1;
+            else if (!strcmp("n", arg+1)) g_dry_run = 1;
             else if (arg[1] == 's' && arg[2] && arg[3] && !arg[4]) {
                 if (byte_from_hex(arg[2], arg[3], &hole_byte)) {
                     fprintf(stderr, "ERROR: invalid hole byte: %s\n", arg);
@@ -1000,6 +1038,10 @@ int main(int argc, const char* argv[])
     //reject tuning options the selected action would silently ignore
     if (max_size_given && action != URSPARSE) {
         fprintf(stderr, "ERROR: --max-size/-M only applies to -u (stream expansion)\n");
+        return 3;
+    }
+    if (g_dry_run && action != URSPARSE) {
+        fprintf(stderr, "ERROR: -n/--dry-run only applies to -u (stream expansion)\n");
         return 3;
     }
     if (hole_byte_given && action != SPARSE_XX) {
