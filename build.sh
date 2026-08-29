@@ -1,2 +1,2 @@
 set -x
-gcc -Wall -g ursparseness.c -o ursparseness
+gcc -Wall -O0 -g ursparseness.c -o ursparseness

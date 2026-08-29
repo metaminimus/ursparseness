@@ -546,7 +546,8 @@ enum actions {
     MAP,
     URSPARSE,
     SPARSE,
-    SPARSE_XX
+    SPARSE_XX,
+    ERROR
 };
 
 
@@ -605,6 +606,10 @@ int main(int argc, const char* argv[])
                 }
             }
         }
+    }
+
+    if (argc < 2) {
+        action = ERROR;
     }
     
     if (block_size < 2) {
