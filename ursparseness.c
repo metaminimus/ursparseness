@@ -133,7 +133,7 @@ int parse_newline(const char* buff, size_t sz, size_t* out_sz)
             return 0;
         }
 
-        fprintf(stderr, "ERROR: invalid char parsing newline pos %ld: %c\n", i, buff[i]);
+        fprintf(stderr, "ERROR: invalid char parsing newline pos %zu: %c\n", i, buff[i]);
         return -1;
     }
 
@@ -145,7 +145,7 @@ int parse_newline(const char* buff, size_t sz, size_t* out_sz)
 //
 //writes the meat to output file
 //
-int do_meat(const char* buff, size_t sz, size_t* out_sz)
+int do_meat(int fd_out, const char* buff, size_t sz, size_t* out_sz)
 {
     if (!buff)   return -1;
     if (!sz)     return -2;
@@ -154,7 +154,7 @@ int do_meat(const char* buff, size_t sz, size_t* out_sz)
     size_t written_bytes = 0;
 
     while (sz > 0) {
-        ssize_t r = write(1, buff, sz);
+        ssize_t r = write(fd_out, buff, sz);
 
         if (-1 == r) {
             perror("ERROR: could not write to output file");
@@ -181,9 +181,9 @@ int do_meat(const char* buff, size_t sz, size_t* out_sz)
 //
 //writes the hole to output file
 //
-int do_hole(off_t offset)
+int do_hole(int fd_out, off_t offset)
 {
-    off_t r = lseek(1, offset, SEEK_SET);
+    off_t r = lseek(fd_out, offset, SEEK_SET);
     if ((off_t)-1 == r) {
         perror("ERROR: could not write hole to output file");
         return -1;
@@ -208,7 +208,18 @@ struct ursparse_state_data {
     //cleared (with the rest of the struct) when a segment completes.
     //lets the caller tell "cut mid-segment" from "clean end + trailing space"
     int seg_started;
+    //offset+length of the last completed segment; segments must not move
+    //backwards into already-written data. survives the per-segment reset.
+    off_t prev_end;
 };
+
+//clears the per-segment parse state for the next segment, keeping prev_end
+static void reset_segment(struct ursparse_state_data* data)
+{
+    off_t prev_end = data->prev_end;
+    memset(data, 0, sizeof(*data));
+    data->prev_end = prev_end;
+}
 
 //parses ursparse line
 //offset length \n
@@ -216,6 +227,7 @@ struct ursparse_state_data {
 //buff, sz  => buffer to parse and its size
 //out_sz    => output number of bytes consumed
 //data      => in/out parser internal state
+//fd_out    => output fd the holes and meat are written to
 //max_size  => if >= 0, reject any segment whose offset+length would push the
 //             reconstructed file past this many bytes (returns -9)
 //
@@ -224,7 +236,7 @@ struct ursparse_state_data {
 //  0 done parsing ursparse line
 //  n intermediate parsing
 //    need more data
-int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_state_data* data, off_t max_size)
+int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_state_data* data, int fd_out, off_t max_size)
 {
     if (!buff)   return -1;
     if (!sz)     return -2;
@@ -239,7 +251,8 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
     case PARSE_START:
 
         data->state = PARSE_OFFSET;
-        
+        __attribute__((fallthrough));
+
     case PARSE_OFFSET:
 
         r = parse_uint(buff, sz, out_sz, &data->ursparse.offset);
@@ -266,6 +279,7 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         }
 
         data->state = PARSE_SIZE;
+        __attribute__((fallthrough));
 
     case PARSE_SIZE:
 
@@ -291,6 +305,7 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         }
 
         data->state = PARSE_NEWLINE;
+        __attribute__((fallthrough));
 
     case PARSE_NEWLINE:
 
@@ -313,42 +328,71 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
             return *out_sz;
         }
 
+        {
+        off_t off = data->ursparse.offset.value;
+        off_t len = data->ursparse.size.value;
+
+        //segments must march forward: a segment that starts inside data an
+        //earlier segment already wrote would overwrite it (and turn an
+        //intended hole into data)
+        if (off < data->prev_end) {
+            fprintf(stderr,
+                "ERROR: segment offset %jd overlaps earlier data ending at %jd\n",
+                (intmax_t)off, (intmax_t)data->prev_end);
+            data->state = PARSE_ERROR;
+            return -10;
+        }
+
         //refuse to expand a stream whose segments would reach past the
         //requested ceiling. offset+size is the file's high-water mark;
         //the subtraction form avoids overflowing off_t
-        if (max_size >= 0) {
-            off_t off = data->ursparse.offset.value;
-            off_t len = data->ursparse.size.value;
-            if (len > max_size || off > max_size - len) {
-                fprintf(stderr,
-                    "ERROR: segment at offset %ld (length %ld) exceeds --max-size %ld\n",
-                    off, len, max_size);
-                data->state = PARSE_ERROR;
-                return -9;
-            }
+        if (max_size >= 0 && (len > max_size || off > max_size - len)) {
+            fprintf(stderr,
+                "ERROR: segment at offset %jd (length %jd) exceeds --max-size %jd\n",
+                (intmax_t)off, (intmax_t)len, (intmax_t)max_size);
+            data->state = PARSE_ERROR;
+            return -9;
         }
 
-        fprintf(stderr, "INFO: processing segment %ld %ld\n",
-                data->ursparse.offset.value, data->ursparse.size.value);
+        //new high-water mark, clamped so off+len can't overflow off_t
+        data->prev_end = (len > OFF_MAX - off) ? OFF_MAX : off + len;
 
-        r = do_hole(data->ursparse.offset.value);
+        fprintf(stderr, "INFO: processing segment %jd %jd\n",
+                (intmax_t)off, (intmax_t)len);
+
+        r = do_hole(fd_out, off);
         if (r < 0) {
             data->state = PARSE_ERROR;
             return -8;
         }
-        
+        }
+
         data->state = PARSE_MEAT;
+        __attribute__((fallthrough));
 
     case PARSE_MEAT:
 
-        if (sz == 0 && data->ursparse.size.value > 0) {
+        if (!data->ursparse.size.value) {
+            //zero-length segment: the hole (if any) is already seeked to,
+            //there is no meat, so the segment is complete
+            *out_sz = extra_sz;
+            reset_segment(data);
+            return 0;
+        }
+
+        if (sz == 0) {
             //the header consumed the rest of this buffer; the meat is still
             //to come, so report progress and wait for the next read
             *out_sz = extra_sz;
             return *out_sz;
         }
 
-        r = do_meat(buff, sz > data->ursparse.size.value ? data->ursparse.size.value : sz, out_sz);
+        {
+        size_t want = (data->ursparse.size.value < (off_t)sz)
+                    ? (size_t)data->ursparse.size.value : sz;
+
+        r = do_meat(fd_out, buff, want, out_sz);
+        }
 
         if (r < 0) {
             fprintf(stderr, "ERROR: could not process meat\n");
@@ -356,7 +400,7 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
             return r;
         }
 
-        if (data->ursparse.size.value < *out_sz) {
+        if (data->ursparse.size.value < (off_t)*out_sz) {
             fprintf(stderr, "ERROR: meat processor broken\n");
             data->state = PARSE_ERROR;
             return -7;
@@ -366,8 +410,7 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         *out_sz += extra_sz;
 
         if (!data->ursparse.size.value) {
-            //reset parsing state
-            memset(data, 0, sizeof(*data));
+            reset_segment(data);
             return 0;
         }
 
@@ -392,7 +435,7 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
 
     char* read_buff = malloc(blk_sz);
     if (!read_buff) {
-        fprintf(stderr, "ERROR: could not allocate memory: %ld bytes\n", blk_sz);
+        fprintf(stderr, "ERROR: could not allocate memory: %zu bytes\n", blk_sz);
         return 2;
     }
 
@@ -420,19 +463,19 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
             break; //EOF reached
         }
 
-        for (size_t cursor = 0; cursor < nbytes; ) {
+        for (size_t cursor = 0; cursor < (size_t)nbytes; ) {
 
             size_t out_sz = 0;
-            int r = parse_ursparse(read_buff + cursor, nbytes - cursor, &out_sz, &data, max_size);
+            int r = parse_ursparse(read_buff + cursor, (size_t)nbytes - cursor, &out_sz, &data, fd_out, max_size);
 
             if (r < 0) {
                 free(read_buff);
-                //-9 is the dedicated "--max-size exceeded" code
-                return r == -9 ? 6 : 4;
+                //-9 => --max-size exceeded, -10 => segments out of order
+                return r == -9 ? 6 : r == -10 ? 7 : 4;
             }
 
-        cursor += out_sz;
-        } 
+            cursor += out_sz;
+        }
     }
 
     free(read_buff);
@@ -459,7 +502,7 @@ int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, size_t sz)
             return -1;
         }
         if (nr == 0) {
-            fprintf(stderr, "ERROR: short read copying data, %ld bytes missing\n", sz);
+            fprintf(stderr, "ERROR: short read copying data, %zu bytes missing\n", sz);
             return -1;
         }
 
@@ -495,7 +538,7 @@ int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
         }
 
         if (r == 0) {
-            fprintf(stderr, "ERROR: short copy of data, %ld bytes missing\n", sz);
+            fprintf(stderr, "ERROR: short copy of data, %zu bytes missing\n", sz);
             return -1;
         }
 
@@ -508,9 +551,9 @@ int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
 //emits one contiguous segment: the "offset length\n" header then the bytes
 int do_sparse_data(int fd_in, int fd_out, off_t start, size_t sz)
 {
-    fprintf(stderr, "INFO: processing segment %ld %ld\n", start, sz);
+    fprintf(stderr, "INFO: processing segment %jd %zu\n", (intmax_t)start, sz);
 
-    if (4 > dprintf(fd_out, "%ld %ld\n", start, sz)) {
+    if (4 > dprintf(fd_out, "%jd %zu\n", (intmax_t)start, sz)) {
         perror("ERROR: could not write segment");
         return -1;
     }
@@ -684,7 +727,7 @@ int do_map (int fd_in)
             break;
         }
 
-        printf("%ld %ld\n", start, end - start);
+        printf("%jd %jd\n", (intmax_t)start, (intmax_t)(end - start));
         start = end;
     }
 
