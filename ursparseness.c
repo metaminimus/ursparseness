@@ -206,16 +206,18 @@ struct ursparse_state_data {
 //parses ursparse line
 //offset length \n
 //
-//buff, sz => buffer to parse and its size
-//out_sz   => output number of bytes consumed
-//data     => in/out parser internal state
+//buff, sz  => buffer to parse and its size
+//out_sz    => output number of bytes consumed
+//data      => in/out parser internal state
+//max_size  => if >= 0, reject any segment whose offset+length would push the
+//             reconstructed file past this many bytes (returns -9)
 //
 //returns
 //  negative number on error
 //  0 done parsing ursparse line
 //  n intermediate parsing
 //    need more data
-int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_state_data* data)
+int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_state_data* data, off_t max_size)
 {
     if (!buff)   return -1;
     if (!sz)     return -2;
@@ -304,6 +306,21 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
             return *out_sz;
         }
 
+        //refuse to expand a stream whose segments would reach past the
+        //requested ceiling. offset+size is the file's high-water mark;
+        //the subtraction form avoids overflowing off_t
+        if (max_size >= 0) {
+            off_t off = data->ursparse.offset.value;
+            off_t len = data->ursparse.size.value;
+            if (len > max_size || off > max_size - len) {
+                fprintf(stderr,
+                    "ERROR: segment at offset %ld (length %ld) exceeds --max-size %ld\n",
+                    off, len, max_size);
+                data->state = PARSE_ERROR;
+                return -9;
+            }
+        }
+
         fprintf(stderr, "INFO: processing segment %ld %ld\n",
                 data->ursparse.offset.value, data->ursparse.size.value);
 
@@ -357,7 +374,7 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
     }
 }
 
-int do_ursparse(int fd_in, int fd_out, size_t blk_sz)
+int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
 {
     //input is a sequential ursparse stream (pipe-friendly, no seek needed)
     //output must be seekable so holes can be recreated via lseek
@@ -399,11 +416,12 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz)
         for (size_t cursor = 0; cursor < nbytes; ) {
 
             size_t out_sz = 0;
-            int r = parse_ursparse(read_buff + cursor, nbytes - cursor, &out_sz, &data);
+            int r = parse_ursparse(read_buff + cursor, nbytes - cursor, &out_sz, &data, max_size);
 
             if (r < 0) {
                 free(read_buff);
-                return 4;
+                //-9 is the dedicated "--max-size exceeded" code
+                return r == -9 ? 6 : 4;
             }
 
         cursor += out_sz;
@@ -598,6 +616,7 @@ int usage(const char* name)
     //fprintf(stderr, "                          all data blocks full of 0xFF will be treated as a hole\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "       -bSIZE,--blocksize=SIZE block size in bytes (defaults to 4096)\n");
+    fprintf(stderr, "       -MSIZE,--max-size=SIZE  abort -u expansion if meat+holes would exceed SIZE bytes\n");
 
     return 0;
 }
@@ -649,12 +668,28 @@ int parse_block_size(const char* s)
     return (int)pu.value;
 }
 
+//parses a byte-count argument (0 .. OFF_MAX)
+//returns the value on success, or -1 on trailing garbage / overflow / empty
+off_t parse_size(const char* s)
+{
+    struct parse_uint_state_data pu = { 0, 0 };
+    size_t consumed = 0;
+    size_t len = strlen(s);
+
+    int r = parse_uint(s, len, &consumed, &pu);
+    if (r < 0 || consumed != len)
+        return -1;
+
+    return pu.value;
+}
+
 int main(int argc, const char* argv[])
 {
     enum actions action = URSPARSE;
     unsigned char hole_byte = 0;
 
     int block_size = 4096;
+    off_t max_size = -1;   //-1 => no limit
 
     //every option is processed; when an option is repeated the last one wins.
     //an unrecognised or malformed argument is a hard error rather than being
@@ -676,6 +711,14 @@ int main(int argc, const char* argv[])
             else if (!strcmp("sparse",   opt)) action = SPARSE;
             else if (!strncmp("blocksize=", opt, sizeof("blocksize=")-1))
                 block_size = parse_block_size(opt + sizeof("blocksize=")-1);
+            else if (!strncmp("max-size=", opt, sizeof("max-size=")-1)) {
+                max_size = parse_size(opt + sizeof("max-size=")-1);
+                if (max_size < 0) {
+                    fprintf(stderr, "ERROR: invalid max size: %s\n", arg);
+                    usage(argv[0]);
+                    return 3;
+                }
+            }
             else {
                 fprintf(stderr, "ERROR: unknown option: %s\n", arg);
                 usage(argv[0]);
@@ -699,6 +742,14 @@ int main(int argc, const char* argv[])
             }
             else if (arg[1] == 'b')
                 block_size = parse_block_size(arg + 2);
+            else if (arg[1] == 'M') {
+                max_size = parse_size(arg + 2);
+                if (max_size < 0) {
+                    fprintf(stderr, "ERROR: invalid max size: %s\n", arg);
+                    usage(argv[0]);
+                    return 3;
+                }
+            }
             else {
                 fprintf(stderr, "ERROR: unknown option: %s\n", arg);
                 usage(argv[0]);
@@ -724,7 +775,7 @@ int main(int argc, const char* argv[])
         return do_map(0);
 
     case URSPARSE:
-        return do_ursparse(0, 1, block_size);
+        return do_ursparse(0, 1, block_size, max_size);
 
     case SPARSE:
         return do_sparse(0, 1, block_size, 0);
