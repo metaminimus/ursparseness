@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -875,6 +876,11 @@ int main(int argc, const char* argv[])
 
     int block_size = 4096;
     off_t max_size = -1;   //-1 => no limit
+
+    //a broken output pipe or an exceeded file-size limit should surface as a
+    //write() error we can report, not a signal that kills us mid-transfer
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGXFSZ, SIG_IGN);
 
     //every option is processed; when an option is repeated the last one wins.
     //an unrecognised or malformed argument is a hard error rather than being
