@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#define _FILE_OFFSET_BITS 64   //64-bit off_t / lseek / pread even on 32-bit builds
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -76,6 +77,7 @@ struct ursparse {
 //              separately from the value matters because a value of 0 split
 //              at a buffer boundary must not be mistaken for "not started
 //              yet" (which would skip and eat the following separator)
+//what       => noun for diagnostics ("offset", "length", "block size", ...)
 //
 //returns
 //  negative number on error
@@ -83,7 +85,7 @@ struct ursparse {
 //  n intermediate parsing,
 //    need more data,
 //    data->value contains intermediate value,
-int parse_uint(const char* buff, size_t sz, size_t* out_sz, struct parse_uint_state_data* data)
+int parse_uint(const char* buff, size_t sz, size_t* out_sz, struct parse_uint_state_data* data, const char* what)
 {
     if (!buff) return -1;
     if (!sz) return -2;
@@ -104,7 +106,7 @@ int parse_uint(const char* buff, size_t sz, size_t* out_sz, struct parse_uint_st
             data->started = 1;
             int d = buff[i] - '0';
             if (data->value > (OFF_MAX - d) / 10) {
-                fprintf(stderr, "ERROR: number too large parsing offset\n");
+                fprintf(stderr, "ERROR: number too large parsing %s\n", what);
                 return -1;
             }
             data->value = data->value * 10 + d;
@@ -117,7 +119,7 @@ int parse_uint(const char* buff, size_t sz, size_t* out_sz, struct parse_uint_st
             return 0; //done parsing
         }
 
-        fprintf(stderr, "ERROR: invalid char parsing offset: %c\n", buff[i]);
+        fprintf(stderr, "ERROR: invalid char parsing %s: %c\n", what, buff[i]);
         return -1;
     }
 
@@ -279,7 +281,7 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
 
     case PARSE_OFFSET:
 
-        r = parse_uint(buff, sz, out_sz, &data->ursparse.offset);
+        r = parse_uint(buff, sz, out_sz, &data->ursparse.offset, "offset");
         if (r < 0) {
             fprintf(stderr, "ERROR: could not parse offset\n");
             data->state = PARSE_ERROR;
@@ -309,7 +311,7 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
 
         //data->ursparse.size has its own started flag, so parse_uint still
         //skips the space between the offset and the size
-        r = parse_uint(buff, sz, out_sz, &data->ursparse.size);
+        r = parse_uint(buff, sz, out_sz, &data->ursparse.size, "length");
 
         if (r < 0) {
             fprintf(stderr, "ERROR: could not parse length\n");
@@ -808,7 +810,6 @@ int usage(const char* name)
 }
 
 enum actions {
-    NONE = 0,
     USAGE,
     MAP,
     URSPARSE,
@@ -847,7 +848,7 @@ int parse_block_size(const char* s)
     //reuse the stream integer parser; it stops at a space/newline (returns 0)
     //or at end-of-buffer (returns >0), so a valid argument is one where the
     //whole string was consumed as digits
-    int r = parse_uint(s, len, &consumed, &pu);
+    int r = parse_uint(s, len, &consumed, &pu, "block size");
     if (r < 0 || consumed != len || pu.value < 2 || pu.value > (1 << 30))
         return -1;
 
@@ -862,7 +863,7 @@ off_t parse_size(const char* s)
     size_t consumed = 0;
     size_t len = strlen(s);
 
-    int r = parse_uint(s, len, &consumed, &pu);
+    int r = parse_uint(s, len, &consumed, &pu, "max size");
     if (r < 0 || consumed != len)
         return -1;
 
