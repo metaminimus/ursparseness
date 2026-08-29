@@ -309,8 +309,9 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
 
 int do_ursparse(int fd_in, int fd_out, size_t blk_sz)
 {
-    off_t r = lseek(fd_in, 0, SEEK_SET);
-    if (r == -1) {
+    //input is a sequential ursparse stream (pipe-friendly, no seek needed)
+    //output must be seekable so holes can be recreated via lseek
+    if (lseek(fd_out, 0, SEEK_CUR) == -1) {
         perror("ERROR: output file is not seekable");
         return 1;
     }
