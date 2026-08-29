@@ -10,6 +10,28 @@
 //the widest unsigned type, shifted right one, then narrowed to off_t
 #define OFF_MAX ((off_t)((~(uintmax_t)0) >> 1))
 
+//EINTR-safe wrappers: a signal must not abort a transfer mid-stream
+static ssize_t read_eintr(int fd, void* buf, size_t n)
+{
+    ssize_t r;
+    do { r = read(fd, buf, n); } while (r == -1 && errno == EINTR);
+    return r;
+}
+
+static ssize_t write_eintr(int fd, const void* buf, size_t n)
+{
+    ssize_t r;
+    do { r = write(fd, buf, n); } while (r == -1 && errno == EINTR);
+    return r;
+}
+
+static ssize_t pread_eintr(int fd, void* buf, size_t n, off_t off)
+{
+    ssize_t r;
+    do { r = pread(fd, buf, n, off); } while (r == -1 && errno == EINTR);
+    return r;
+}
+
 //
 //ursparse file format
 //
@@ -154,7 +176,7 @@ int do_meat(int fd_out, const char* buff, size_t sz, size_t* out_sz)
     size_t written_bytes = 0;
 
     while (sz > 0) {
-        ssize_t r = write(fd_out, buff, sz);
+        ssize_t r = write_eintr(fd_out, buff, sz);
 
         if (-1 == r) {
             perror("ERROR: could not write to output file");
@@ -443,7 +465,7 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
     memset(&data, 0, sizeof(data));
 
     while (1) {
-        ssize_t nbytes = read(fd_in, read_buff, blk_sz);
+        ssize_t nbytes = read_eintr(fd_in, read_buff, blk_sz);
 
         if (nbytes == -1) {
             perror("ERROR: could not read from input file");
@@ -496,7 +518,7 @@ int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, size_t sz)
     while (sz > 0) {
         size_t want = sz < sizeof(copy_rw_buff) ? sz : sizeof(copy_rw_buff);
 
-        ssize_t nr = pread(fd_in, copy_rw_buff, want, start);
+        ssize_t nr = pread_eintr(fd_in, copy_rw_buff, want, start);
         if (nr == -1) {
             perror("ERROR: could not read data");
             return -1;
@@ -507,7 +529,7 @@ int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, size_t sz)
         }
 
         for (ssize_t off = 0; off < nr; ) {
-            ssize_t nw = write(fd_out, copy_rw_buff + off, nr - off);
+            ssize_t nw = write_eintr(fd_out, copy_rw_buff + off, nr - off);
             if (nw == -1) {
                 perror("ERROR: could not copy data");
                 return -1;
@@ -528,6 +550,10 @@ int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
         ssize_t r = copy_file_range(fd_in, &start, fd_out, 0, sz, 0);
 
         if (r == -1) {
+            if (errno == EINTR) {
+                //interrupted before copying anything; retry
+                continue;
+            }
             if (errno == ENOSYS || errno == EXDEV || errno == EINVAL
                     || errno == EOPNOTSUPP) {
                 //copy_file_range not usable here; fall back
@@ -568,7 +594,7 @@ static int read_full(int fd, char* buf, size_t n, off_t off)
 {
     size_t got = 0;
     while (got < n) {
-        ssize_t r = pread(fd, buf + got, n - got, off + (off_t)got);
+        ssize_t r = pread_eintr(fd, buf + got, n - got, off + (off_t)got);
         if (r == -1) {
             perror("ERROR: could not read data");
             return -1;
