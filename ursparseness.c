@@ -183,6 +183,10 @@ enum ursparse_state {
 struct ursparse_state_data {
     struct ursparse ursparse;
     enum ursparse_state state;
+    //set once a digit of the current segment's header has been consumed;
+    //cleared (with the rest of the struct) when a segment completes.
+    //lets the caller tell "cut mid-segment" from "clean end + trailing space"
+    int seg_started;
 };
 
 //parses ursparse line
@@ -221,6 +225,11 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
             data->state = PARSE_ERROR;
             return r;
         }
+
+        //parse_uint only ever stops on a digit when it hits end-of-buffer,
+        //so a trailing digit in the consumed range means the header started
+        if (*out_sz > 0 && buff[*out_sz - 1] >= '0' && buff[*out_sz - 1] <= '9')
+            data->seg_started = 1;
 
         buff += *out_sz;
         sz -= *out_sz;
@@ -358,7 +367,17 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz)
             return 3;
         }
 
-        if (!nbytes) break; //EOF reached
+        if (!nbytes) {
+            //EOF: a well-formed stream ends exactly on a segment boundary,
+            //which resets the parser (seg_started back to 0). If a segment's
+            //header or meat was in progress, the stream was cut mid-transfer.
+            if (data.seg_started || data.state == PARSE_MEAT) {
+                fprintf(stderr, "ERROR: input ends mid-segment, ursparse stream is truncated\n");
+                free(read_buff);
+                return 5;
+            }
+            break; //EOF reached
+        }
 
         for (size_t cursor = 0; cursor < nbytes; ) {
 
