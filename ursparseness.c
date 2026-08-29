@@ -518,24 +518,23 @@ int do_sparse(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte)
         if (end == -1) {
             if (errno == ENXIO) {
                  //EOF reached
-                 break; 
+                 break;
             }
             perror("ERROR: could not seek");
             return 1;
         }
 
-        //printf("%ld %ld\n", start, end - start);
+        if (end <= start) {
+            //no forward progress: the input is not a regular file with real
+            //data extents (e.g. /dev/null, where every lseek returns 0).
+            //stop rather than spin forever.
+            break;
+        }
+
         if (do_sparse_data(fd_in, fd_out, blk_sz, hole_byte, start, end-start)) {
             return 2;
         }
         start = end;
-    }
-
-    if (start != -1 && end != -1) {
-        //printf("%ld %ld\n", start, end - start);
-        if (do_sparse_data(fd_in, fd_out, blk_sz, hole_byte, start, end-start)) {
-            return 3;
-        }
     }
 
     return 0;
@@ -566,18 +565,21 @@ int do_map (int fd_in)
         if (end == -1) {
             if (errno == ENXIO) {
                  //EOF reached
-                 break; 
+                 break;
             }
             perror("ERROR: could not seek");
             return 1;
+        }
+
+        if (end <= start) {
+            //no forward progress (e.g. /dev/null); stop rather than spin forever
+            break;
         }
 
         printf("%ld %ld\n", start, end - start);
         start = end;
     }
 
-    if (start != -1 && end != -1)
-        printf("%ld %ld\n", start, end - start);
     return 0;
 }
 
