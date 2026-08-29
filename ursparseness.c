@@ -354,14 +354,70 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz)
     return 0;
 }
 
+//
+//copies sz bytes from fd_in (at offset start) to fd_out (at its current
+//position), looping until all bytes are transferred.
+//
+//falls back to a read/write loop when copy_file_range is unavailable
+//(old kernel, cross-filesystem, or not supported for these fds)
+//
+static char copy_rw_buff[65536];
+
+int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, size_t sz)
+{
+    while (sz > 0) {
+        size_t want = sz < sizeof(copy_rw_buff) ? sz : sizeof(copy_rw_buff);
+
+        ssize_t nr = pread(fd_in, copy_rw_buff, want, start);
+        if (nr == -1) {
+            perror("ERROR: could not read data");
+            return -1;
+        }
+        if (nr == 0) {
+            fprintf(stderr, "ERROR: short read copying data, %ld bytes missing\n", sz);
+            return -1;
+        }
+
+        for (ssize_t off = 0; off < nr; ) {
+            ssize_t nw = write(fd_out, copy_rw_buff + off, nr - off);
+            if (nw == -1) {
+                perror("ERROR: could not copy data");
+                return -1;
+            }
+            off += nw;
+        }
+
+        start += nr;
+        sz -= nr;
+    }
+
+    return 0;
+}
+
 int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
 {
-    ssize_t r = copy_file_range(fd_in, &start, fd_out, 0, sz, 0);
-    if (r == -1) {
-        perror("ERROR: could not copy data");
-        return -1;
+    while (sz > 0) {
+        ssize_t r = copy_file_range(fd_in, &start, fd_out, 0, sz, 0);
+
+        if (r == -1) {
+            if (errno == ENOSYS || errno == EXDEV || errno == EINVAL
+                    || errno == EOPNOTSUPP) {
+                //copy_file_range not usable here; fall back
+                return do_sparse_copy_rw(fd_in, fd_out, start, sz);
+            }
+            perror("ERROR: could not copy data");
+            return -1;
+        }
+
+        if (r == 0) {
+            fprintf(stderr, "ERROR: short copy of data, %ld bytes missing\n", sz);
+            return -1;
+        }
+
+        sz -= r;
     }
-    return r;
+
+    return 0;
 }
 
 int do_sparse_data(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte, off_t start, size_t sz)
