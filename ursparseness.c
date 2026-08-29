@@ -877,6 +877,12 @@ int main(int argc, const char* argv[])
     int block_size = 4096;
     off_t max_size = -1;   //-1 => no limit
 
+    //track which tuning options were actually supplied, so we can reject
+    //combinations the chosen action would silently ignore
+    int block_size_given = 0;
+    int max_size_given   = 0;
+    int hole_byte_given  = 0;
+
     //a broken output pipe or an exceeded file-size limit should surface as a
     //write() error we can report, not a signal that kills us mid-transfer
     signal(SIGPIPE, SIG_IGN);
@@ -900,10 +906,13 @@ int main(int argc, const char* argv[])
             else if (!strcmp("map",      opt)) action = MAP;
             else if (!strcmp("ursparse", opt)) action = URSPARSE;
             else if (!strcmp("sparse",   opt)) action = SPARSE;
-            else if (!strncmp("blocksize=", opt, sizeof("blocksize=")-1))
+            else if (!strncmp("blocksize=", opt, sizeof("blocksize=")-1)) {
                 block_size = parse_block_size(opt + sizeof("blocksize=")-1);
+                block_size_given = 1;
+            }
             else if (!strncmp("max-size=", opt, sizeof("max-size=")-1)) {
                 max_size = parse_size(opt + sizeof("max-size=")-1);
+                max_size_given = 1;
                 if (max_size < 0) {
                     fprintf(stderr, "ERROR: invalid max size: %s\n", arg);
                     usage(argv[0]);
@@ -930,11 +939,15 @@ int main(int argc, const char* argv[])
                     return 2;
                 }
                 action = SPARSE_XX;
+                hole_byte_given = 1;
             }
-            else if (arg[1] == 'b')
+            else if (arg[1] == 'b') {
                 block_size = parse_block_size(arg + 2);
+                block_size_given = 1;
+            }
             else if (arg[1] == 'M') {
                 max_size = parse_size(arg + 2);
+                max_size_given = 1;
                 if (max_size < 0) {
                     fprintf(stderr, "ERROR: invalid max size: %s\n", arg);
                     usage(argv[0]);
@@ -953,15 +966,31 @@ int main(int argc, const char* argv[])
         action = ERROR;
     }
 
+    //--help wins over everything and never complains about companion flags
+    if (action == USAGE) {
+        return usage(argv[0]);
+    }
+
+    //reject tuning options the selected action would silently ignore
+    if (max_size_given && action != URSPARSE) {
+        fprintf(stderr, "ERROR: --max-size/-M only applies to -u (stream expansion)\n");
+        return 3;
+    }
+    if (hole_byte_given && action != SPARSE_XX) {
+        fprintf(stderr, "ERROR: a hole byte (-sHH) cannot be combined with another mode\n");
+        return 3;
+    }
+    if (block_size_given && action == MAP) {
+        fprintf(stderr, "ERROR: -b/--blocksize has no effect with -m\n");
+        return 3;
+    }
+
     if (block_size < 2) {
-        fprintf(stderr, "ERROR: invalid block size\n"); 
+        fprintf(stderr, "ERROR: invalid block size\n");
         return 3;
     }
 
     switch (action) {
-    case USAGE:
-        return usage(argv[0]);
-
     case MAP:
         return do_map(0);
 
