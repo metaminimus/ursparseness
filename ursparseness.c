@@ -534,6 +534,11 @@ int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, size_t sz)
                 perror("ERROR: could not copy data");
                 return -1;
             }
+            if (nw == 0) {
+                //write() accepted nothing; retrying would spin forever
+                fprintf(stderr, "ERROR: write to output made no progress\n");
+                return -1;
+            }
             off += nw;
         }
 
