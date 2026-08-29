@@ -631,34 +631,53 @@ int main(int argc, const char* argv[])
 
     int block_size = 4096;
 
+    //every option is processed; when an option is repeated the last one wins.
+    //an unrecognised or malformed argument is a hard error rather than being
+    //silently ignored.
     for (int i = 1; i < argc; ++i) {
-        if (argv[i][0] == '-') {
-            if (argv[i][1] == '-') {
-                if (!strcmp("help",     argv[i]+2)) { action = USAGE; break; }
-                if (!strcmp("map",      argv[i]+2)) { action = MAP; break; }
-                if (!strcmp("ursparse", argv[i]+2)) { action = URSPARSE; break; }
-                if (!strcmp("sparse",   argv[i]+2)) { action = SPARSE; break; }
-                if (!strncmp("blocksize=", argv[i]+2, sizeof("blocksize=")-1)) {
-                    block_size = parse_block_size(argv[i]+2 + sizeof("blocksize=")-1);
-                    break;
-                }
-            } 
+        const char* arg = argv[i];
+
+        if (arg[0] != '-' || arg[1] == 0) {
+            fprintf(stderr, "ERROR: unexpected argument: %s\n", arg);
+            usage(argv[0]);
+            return 1;
+        }
+
+        if (arg[1] == '-') {
+            const char* opt = arg + 2;
+            if      (!strcmp("help",     opt)) action = USAGE;
+            else if (!strcmp("map",      opt)) action = MAP;
+            else if (!strcmp("ursparse", opt)) action = URSPARSE;
+            else if (!strcmp("sparse",   opt)) action = SPARSE;
+            else if (!strncmp("blocksize=", opt, sizeof("blocksize=")-1))
+                block_size = parse_block_size(opt + sizeof("blocksize=")-1);
             else {
-                if (argv[i][1] == 'h' && argv[i][2] == 0) { action = USAGE; break; }
-                if (argv[i][1] == 'm' && argv[i][2] == 0) { action = MAP; break; }
-                if (argv[i][1] == 'u' && argv[i][2] == 0) { action = URSPARSE; break; }
-                if (argv[i][1] == 's' && argv[i][2] == 0) { action = SPARSE; break; }
-                if (argv[i][1] == 's' && argv[i][4] == 0) { 
-                    if (byte_from_hex(argv[i][2], argv[i][3], &hole_byte)) {
-                        usage(argv[0]);
-                        return 2;
-                    }
-                    action=SPARSE_XX; break; 
+                fprintf(stderr, "ERROR: unknown option: %s\n", arg);
+                usage(argv[0]);
+                return 1;
+            }
+        }
+        else {
+            //short-circuit &&: arg[3]/arg[4] are only read once the earlier
+            //bytes are known non-NUL, so this never reads past the string
+            if      (!strcmp("h", arg+1)) action = USAGE;
+            else if (!strcmp("m", arg+1)) action = MAP;
+            else if (!strcmp("u", arg+1)) action = URSPARSE;
+            else if (!strcmp("s", arg+1)) action = SPARSE;
+            else if (arg[1] == 's' && arg[2] && arg[3] && !arg[4]) {
+                if (byte_from_hex(arg[2], arg[3], &hole_byte)) {
+                    fprintf(stderr, "ERROR: invalid hole byte: %s\n", arg);
+                    usage(argv[0]);
+                    return 2;
                 }
-                if (argv[i][1] == 'b') {
-                    block_size = parse_block_size(argv[i]+2);
-                    break;
-                }
+                action = SPARSE_XX;
+            }
+            else if (arg[1] == 'b')
+                block_size = parse_block_size(arg + 2);
+            else {
+                fprintf(stderr, "ERROR: unknown option: %s\n", arg);
+                usage(argv[0]);
+                return 1;
             }
         }
     }
@@ -666,7 +685,7 @@ int main(int argc, const char* argv[])
     if (argc < 2) {
         action = ERROR;
     }
-    
+
     if (block_size < 2) {
         fprintf(stderr, "ERROR: invalid block size\n"); 
         return 3;
