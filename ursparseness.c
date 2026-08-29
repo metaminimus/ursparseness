@@ -1,9 +1,13 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+
+//largest value representable in off_t (two's complement signed type)
+#define OFF_MAX ((off_t)(~((off_t)1 << (sizeof(off_t) * CHAR_BIT - 1))))
 
 //
 //ursparse file format
@@ -60,8 +64,12 @@ int parse_uint(const char* buff, size_t sz, size_t* out_sz, off_t* out_n)
     for (; i < sz; ++i) {
         if (buff[i] >= '0' && buff[i] <= '9') {
             //numerals
-            *out_n *= 10;
-            *out_n += buff[i] - '0';
+            int d = buff[i] - '0';
+            if (*out_n > (OFF_MAX - d) / 10) {
+                fprintf(stderr, "ERROR: number too large parsing offset\n");
+                return -1;
+            }
+            *out_n = *out_n * 10 + d;
             continue;
         }
 
@@ -219,6 +227,9 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         extra_sz += *out_sz;
 
         if (r > 0) {
+            //report every byte consumed so far this call, not just this stage's,
+            //so the caller advances its cursor past the already-parsed prefix
+            *out_sz = extra_sz;
             return *out_sz;
         }
 
@@ -239,6 +250,9 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         extra_sz += *out_sz;
 
         if (r > 0) {
+            //report every byte consumed so far this call, not just this stage's,
+            //so the caller advances its cursor past the already-parsed prefix
+            *out_sz = extra_sz;
             return *out_sz;
         }
 
@@ -259,6 +273,9 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         extra_sz += *out_sz;
 
         if (r > 0) {
+            //report every byte consumed so far this call, not just this stage's,
+            //so the caller advances its cursor past the already-parsed prefix
+            *out_sz = extra_sz;
             return *out_sz;
         }
 
@@ -272,7 +289,14 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         
         data->state = PARSE_MEAT;
 
-    case PARSE_MEAT: 
+    case PARSE_MEAT:
+
+        if (sz == 0 && data->ursparse.size > 0) {
+            //the header consumed the rest of this buffer; the meat is still
+            //to come, so report progress and wait for the next read
+            *out_sz = extra_sz;
+            return *out_sz;
+        }
 
         r = do_meat(buff, sz > data->ursparse.size ? data->ursparse.size : sz, out_sz);
 
@@ -569,7 +593,19 @@ int byte_from_hex(char a, char b, unsigned char* byte)
     return 0;
 }
 
-int main(int argc, const char* argv[]) 
+//parses a block size argument
+//returns the value on success, or -1 on overflow / trailing garbage / out of range
+int parse_block_size(const char* s)
+{
+    char* end = 0;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno || end == s || *end != '\0' || v < 2 || v > (1 << 30))
+        return -1;
+    return (int)v;
+}
+
+int main(int argc, const char* argv[])
 {
     enum actions action = URSPARSE;
     unsigned char hole_byte = 0;
@@ -584,7 +620,7 @@ int main(int argc, const char* argv[])
                 if (!strcmp("ursparse", argv[i]+2)) { action = URSPARSE; break; }
                 if (!strcmp("sparse",   argv[i]+2)) { action = SPARSE; break; }
                 if (!strncmp("blocksize=", argv[i]+2, sizeof("blocksize=")-1)) {
-                    block_size = atoi(argv[i]+2 + sizeof("blocksize=")-1);
+                    block_size = parse_block_size(argv[i]+2 + sizeof("blocksize=")-1);
                     break;
                 }
             } 
@@ -601,7 +637,7 @@ int main(int argc, const char* argv[])
                     action=SPARSE_XX; break; 
                 }
                 if (argv[i][1] == 'b') {
-                    block_size = atoi(argv[i]+2);
+                    block_size = parse_block_size(argv[i]+2);
                     break;
                 }
             }
