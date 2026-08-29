@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
+#define VERSION "1.0"
 //largest value representable in off_t (a signed type in POSIX): all-ones in
 //the widest unsigned type, shifted right one, then narrowed to off_t
 #define OFF_MAX ((off_t)((~(uintmax_t)0) >> 1))
@@ -792,25 +793,28 @@ int do_map (int fd_in)
 
 int usage(const char* name)
 {
+    fprintf(stderr, "%s VERSION %s: ", name, VERSION);
     fprintf(stderr, "Helper utility to encode/decode sparse files to/from ursparse format\n\n");
     fprintf(stderr, "USAGE: %s options < input_file [ > output_file ]\n", name);
     fprintf(stderr, "       -h,    --help      shows usage\n");
+    fprintf(stderr, "       -v,    --version   shows version\n");
     fprintf(stderr, "       -m,    --map       shows map of data blocks for sparse input file\n");
     fprintf(stderr, "       -u,    --ursparse  reads ursparse input file and writes sparse file to output (default option)\n");
     fprintf(stderr, "       -s,    --sparse    reads sparse input file and writes ursparse format to output file\n");
+    fprintf(stderr, "       -bSIZE,--blocksize=SIZE block size in bytes (defaults to 4096)\n");
+    fprintf(stderr, "       -MSIZE,--max-size=SIZE  abort -u expansion if meat+holes would exceed SIZE bytes\n");
+    fprintf(stderr, "\n");
     fprintf(stderr, "       -sHH              like -s, but also treats any data block that is entirely\n");
     fprintf(stderr, "                         byte 0xHH as a hole\n");
     fprintf(stderr, "       -s00              treat data blocks that are all 0x00 as holes\n");
     fprintf(stderr, "       -sFF              treat data blocks that are all 0xFF as holes\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "       -bSIZE,--blocksize=SIZE block size in bytes (defaults to 4096)\n");
-    fprintf(stderr, "       -MSIZE,--max-size=SIZE  abort -u expansion if meat+holes would exceed SIZE bytes\n");
 
     return 0;
 }
 
 enum actions {
     USAGE,
+    SHOW_VERSION,
     MAP,
     URSPARSE,
     SPARSE,
@@ -904,6 +908,7 @@ int main(int argc, const char* argv[])
         if (arg[1] == '-') {
             const char* opt = arg + 2;
             if      (!strcmp("help",     opt)) action = USAGE;
+            else if (!strcmp("version",  opt)) action = SHOW_VERSION;
             else if (!strcmp("map",      opt)) action = MAP;
             else if (!strcmp("ursparse", opt)) action = URSPARSE;
             else if (!strcmp("sparse",   opt)) action = SPARSE;
@@ -930,6 +935,7 @@ int main(int argc, const char* argv[])
             //short-circuit &&: arg[3]/arg[4] are only read once the earlier
             //bytes are known non-NUL, so this never reads past the string
             if      (!strcmp("h", arg+1)) action = USAGE;
+            else if (!strcmp("v", arg+1)) action = SHOW_VERSION;
             else if (!strcmp("m", arg+1)) action = MAP;
             else if (!strcmp("u", arg+1)) action = URSPARSE;
             else if (!strcmp("s", arg+1)) action = SPARSE;
@@ -992,6 +998,10 @@ int main(int argc, const char* argv[])
     }
 
     switch (action) {
+    case SHOW_VERSION:
+        fprintf(stderr, "%s VERSION %s\n", argv[0], VERSION);
+        return 0;    
+
     case MAP:
         return do_map(0);
 
