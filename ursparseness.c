@@ -536,10 +536,11 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
 //
 static char copy_rw_buff[65536];
 
-int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, size_t sz)
+int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, off_t sz)
 {
     while (sz > 0) {
-        size_t want = sz < sizeof(copy_rw_buff) ? sz : sizeof(copy_rw_buff);
+        size_t want = sz < (off_t)sizeof(copy_rw_buff)
+                    ? (size_t)sz : sizeof(copy_rw_buff);
 
         ssize_t nr = pread_eintr(fd_in, copy_rw_buff, want, start);
         if (nr == -1) {
@@ -547,7 +548,7 @@ int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, size_t sz)
             return -1;
         }
         if (nr == 0) {
-            fprintf(stderr, "ERROR: short read copying data, %zu bytes missing\n", sz);
+            fprintf(stderr, "ERROR: short read copying data, %jd bytes missing\n", (intmax_t)sz);
             return -1;
         }
 
@@ -572,10 +573,15 @@ int do_sparse_copy_rw(int fd_in, int fd_out, off_t start, size_t sz)
     return 0;
 }
 
-int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
+int do_sparse_copy_data(int fd_in, int fd_out, off_t start, off_t sz)
 {
     while (sz > 0) {
-        ssize_t r = copy_file_range(fd_in, &start, fd_out, 0, sz, 0);
+        //copy_file_range's length is size_t; on a 32-bit build cap each call
+        //at SIZE_MAX and let the loop handle the rest (the kernel already
+        //returns a short count for large requests)
+        size_t chunk = (uintmax_t)sz > (uintmax_t)SIZE_MAX ? SIZE_MAX : (size_t)sz;
+
+        ssize_t r = copy_file_range(fd_in, &start, fd_out, 0, chunk, 0);
 
         if (r == -1) {
             if (errno == EINTR) {
@@ -592,7 +598,7 @@ int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
         }
 
         if (r == 0) {
-            fprintf(stderr, "ERROR: short copy of data, %zu bytes missing\n", sz);
+            fprintf(stderr, "ERROR: short copy of data, %jd bytes missing\n", (intmax_t)sz);
             return -1;
         }
 
@@ -603,12 +609,12 @@ int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
 }
 
 //emits one contiguous segment: the "offset length\n" header then the bytes
-int do_sparse_data(int fd_in, int fd_out, off_t start, size_t sz)
+int do_sparse_data(int fd_in, int fd_out, off_t start, off_t sz)
 {
     if (!g_quiet)
-        fprintf(stderr, "INFO: processing segment %jd %zu\n", (intmax_t)start, sz);
+        fprintf(stderr, "INFO: processing segment %jd %jd\n", (intmax_t)start, (intmax_t)sz);
 
-    if (4 > dprintf(fd_out, "%jd %zu\n", (intmax_t)start, sz)) {
+    if (4 > dprintf(fd_out, "%jd %jd\n", (intmax_t)start, (intmax_t)sz)) {
         perror("ERROR: could not write segment");
         return -1;
     }
@@ -641,14 +647,14 @@ static int read_full(int fd, char* buf, size_t n, off_t off)
 //blk_sz blocks and drops every block that is entirely `hole_byte`, emitting
 //each surviving run of blocks as its own segment. buf must hold blk_sz bytes.
 int do_sparse_data_holy(int fd_in, int fd_out, char* buf, size_t blk_sz,
-                        unsigned char hole_byte, off_t start, size_t sz)
+                        unsigned char hole_byte, off_t start, off_t sz)
 {
     off_t pos = start;
-    size_t left = sz;
+    off_t left = sz;
     off_t run_start = -1;   //-1 => no run open
 
     while (left > 0) {
-        size_t chunk = left < blk_sz ? left : blk_sz;
+        size_t chunk = left < (off_t)blk_sz ? (size_t)left : blk_sz;
 
         if (read_full(fd_in, buf, chunk, pos))
             return -1;
@@ -659,7 +665,7 @@ int do_sparse_data_holy(int fd_in, int fd_out, char* buf, size_t blk_sz,
 
         if (is_hole) {
             if (run_start != -1) {
-                if (do_sparse_data(fd_in, fd_out, run_start, (size_t)(pos - run_start)))
+                if (do_sparse_data(fd_in, fd_out, run_start, pos - run_start))
                     return -1;
                 run_start = -1;
             }
@@ -669,11 +675,11 @@ int do_sparse_data_holy(int fd_in, int fd_out, char* buf, size_t blk_sz,
         }
 
         pos  += (off_t)chunk;
-        left -= chunk;
+        left -= (off_t)chunk;
     }
 
     if (run_start != -1)
-        return do_sparse_data(fd_in, fd_out, run_start, (size_t)(pos - run_start));
+        return do_sparse_data(fd_in, fd_out, run_start, pos - run_start);
 
     return 0;
 }
