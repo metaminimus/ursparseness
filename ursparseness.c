@@ -498,7 +498,8 @@ int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
     return 0;
 }
 
-int do_sparse_data(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte, off_t start, size_t sz)
+//emits one contiguous segment: the "offset length\n" header then the bytes
+int do_sparse_data(int fd_in, int fd_out, off_t start, size_t sz)
 {
     fprintf(stderr, "INFO: processing segment %ld %ld\n", start, sz);
 
@@ -512,12 +513,85 @@ int do_sparse_data(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byt
     return 0;
 }
 
+//reads exactly n bytes from fd at offset off into buf
+static int read_full(int fd, char* buf, size_t n, off_t off)
+{
+    size_t got = 0;
+    while (got < n) {
+        ssize_t r = pread(fd, buf + got, n - got, off + (off_t)got);
+        if (r == -1) {
+            perror("ERROR: could not read data");
+            return -1;
+        }
+        if (r == 0) {
+            fprintf(stderr, "ERROR: short read scanning data, %zu bytes missing\n", n - got);
+            return -1;
+        }
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+//like do_sparse_data, but for the -sHH modes: walks [start, start+sz) in
+//blk_sz blocks and drops every block that is entirely `hole_byte`, emitting
+//each surviving run of blocks as its own segment. buf must hold blk_sz bytes.
+int do_sparse_data_holy(int fd_in, int fd_out, char* buf, size_t blk_sz,
+                        unsigned char hole_byte, off_t start, size_t sz)
+{
+    off_t pos = start;
+    size_t left = sz;
+    off_t run_start = -1;   //-1 => no run open
+
+    while (left > 0) {
+        size_t chunk = left < blk_sz ? left : blk_sz;
+
+        if (read_full(fd_in, buf, chunk, pos))
+            return -1;
+
+        int is_hole = 1;
+        for (size_t k = 0; k < chunk; ++k)
+            if ((unsigned char)buf[k] != hole_byte) { is_hole = 0; break; }
+
+        if (is_hole) {
+            if (run_start != -1) {
+                if (do_sparse_data(fd_in, fd_out, run_start, (size_t)(pos - run_start)))
+                    return -1;
+                run_start = -1;
+            }
+        }
+        else if (run_start == -1) {
+            run_start = pos;
+        }
+
+        pos  += (off_t)chunk;
+        left -= chunk;
+    }
+
+    if (run_start != -1)
+        return do_sparse_data(fd_in, fd_out, run_start, (size_t)(pos - run_start));
+
+    return 0;
+}
+
 int do_sparse(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte)
 {
-    off_t start  = lseek(fd_in, 0, SEEK_SET);
+    char* scan_buf = 0;
+    int ret = 0;
+
+    if (hole_byte) {
+        //-sHH needs a block-sized buffer to test each block for the hole byte
+        scan_buf = malloc(blk_sz);
+        if (!scan_buf) {
+            fprintf(stderr, "ERROR: could not allocate memory: %zu bytes\n", blk_sz);
+            return 4;
+        }
+    }
+
+    off_t start = lseek(fd_in, 0, SEEK_SET);
     if (start == -1) {
         perror("ERROR: input file is not seekable");
-        return 1;
+        ret = 1;
+        goto done;
     }
 
     off_t end = 0;
@@ -526,12 +600,13 @@ int do_sparse(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte)
         if (start == -1) {
             if (errno == ENXIO) {
                  //EOF reached
-                 break; 
+                 break;
             }
             perror("ERROR: could not seek");
-            return 1;
+            ret = 1;
+            goto done;
         }
-    
+
         end = lseek(fd_in, start, SEEK_HOLE);
 
         if (end == -1) {
@@ -540,7 +615,8 @@ int do_sparse(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte)
                  break;
             }
             perror("ERROR: could not seek");
-            return 1;
+            ret = 1;
+            goto done;
         }
 
         if (end <= start) {
@@ -550,13 +626,19 @@ int do_sparse(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte)
             break;
         }
 
-        if (do_sparse_data(fd_in, fd_out, blk_sz, hole_byte, start, end-start)) {
-            return 2;
+        int rc = hole_byte
+            ? do_sparse_data_holy(fd_in, fd_out, scan_buf, blk_sz, *hole_byte, start, end-start)
+            : do_sparse_data(fd_in, fd_out, start, end-start);
+        if (rc) {
+            ret = 2;
+            goto done;
         }
         start = end;
     }
 
-    return 0;
+done:
+    free(scan_buf);
+    return ret;
 }
 
 int do_map (int fd_in)
@@ -610,10 +692,10 @@ int usage(const char* name)
     fprintf(stderr, "       -m,    --map       shows map of data blocks for sparse input file\n");
     fprintf(stderr, "       -u,    --ursparse  reads ursparse input file and writes sparse file to output (default option)\n");
     fprintf(stderr, "       -s,    --sparse    reads sparse input file and writes ursparse format to output file\n");
-    //fprintf(stderr, "       -s00               reads sparse input file and writes ursparse format to output file\n");
-    //fprintf(stderr, "                          all data blocks full of 0x00 will be treated as a hole\n");
-    //fprintf(stderr, "       -sFF               reads sparse input file and writes ursparse format to output file\n");
-    //fprintf(stderr, "                          all data blocks full of 0xFF will be treated as a hole\n");
+    fprintf(stderr, "       -sHH              like -s, but also treats any data block that is entirely\n");
+    fprintf(stderr, "                         byte 0xHH as a hole\n");
+    fprintf(stderr, "       -s00              treat data blocks that are all 0x00 as holes\n");
+    fprintf(stderr, "       -sFF              treat data blocks that are all 0xFF as holes\n");
     fprintf(stderr, "\n");
     fprintf(stderr, "       -bSIZE,--blocksize=SIZE block size in bytes (defaults to 4096)\n");
     fprintf(stderr, "       -MSIZE,--max-size=SIZE  abort -u expansion if meat+holes would exceed SIZE bytes\n");
