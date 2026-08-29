@@ -48,14 +48,17 @@ static ssize_t pread_eintr(int fd, void* buf, size_t n, off_t off)
 //holes are ignored and will be recreated on the other end implicitly when
 //the data segments are written to their appropiate offsets
 //
-//spaces and newlines ignored in offset line
+//each segment is a header line followed by its meat:
 //offset length\n
 //meat
 //offset length\n
 //meat
 //...
 //
-//offset and length are ascii unsigned integers
+//offset and length are ascii unsigned integers separated by a single space,
+//the line ending in a newline. leading spaces and blank lines before an
+//offset are skipped; a space or newline immediately after the digits ends
+//the field (a newline in the middle of a number is not accepted).
 //
 
 //running state for parse_uint, held by the caller across calls: a single
@@ -614,7 +617,8 @@ int do_sparse_data(int fd_in, int fd_out, off_t start, off_t sz)
     if (!g_quiet)
         fprintf(stderr, "INFO: processing segment %jd %jd\n", (intmax_t)start, (intmax_t)sz);
 
-    if (4 > dprintf(fd_out, "%jd %jd\n", (intmax_t)start, (intmax_t)sz)) {
+    //dprintf returns the byte count, or a negative value on write error
+    if (dprintf(fd_out, "%jd %jd\n", (intmax_t)start, (intmax_t)sz) < 0) {
         perror("ERROR: could not write segment");
         return -1;
     }
@@ -1014,8 +1018,9 @@ int main(int argc, const char* argv[])
 
     switch (action) {
     case SHOW_VERSION:
-        fprintf(stderr, "%s VERSION %s\n", argv[0], VERSION);
-        return 0;    
+        //version is requested output, not a diagnostic: send it to stdout
+        printf("%s VERSION %s\n", argv[0], VERSION);
+        return 0;
 
     case MAP:
         return do_map(0);
