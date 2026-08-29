@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -452,6 +453,18 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
     //output must be seekable so holes can be recreated via lseek
     if (lseek(fd_out, 0, SEEK_CUR) == -1) {
         perror("ERROR: output file is not seekable");
+        return 1;
+    }
+
+    //O_APPEND forces every write to EOF regardless of lseek, so do_hole's
+    //seeks would be silently ignored and every segment concatenated
+    int flags = fcntl(fd_out, F_GETFL);
+    if (flags == -1) {
+        perror("ERROR: could not query output file");
+        return 1;
+    }
+    if (flags & O_APPEND) {
+        fprintf(stderr, "ERROR: output file is in append mode; holes cannot be recreated (redirect with > not >>)\n");
         return 1;
     }
 
