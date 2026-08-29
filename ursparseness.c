@@ -26,9 +26,18 @@
 //offset and length are ascii unsigned integers
 //
 
+//running state for parse_uint, held by the caller across calls: a single
+//number may be split over several input buffers, so the accumulated value
+//and "have we seen a numeral yet" must survive between calls. one instance
+//per number being parsed.
+struct parse_uint_state_data {
+    off_t value;    //parsed value, and running accumulator between calls
+    int   started;  //set once the first numeral has been consumed
+};
+
 struct ursparse {
-    off_t offset;
-    off_t size;
+    struct parse_uint_state_data offset;
+    struct parse_uint_state_data size;
 };
 
 //parses unsigned integer
@@ -37,25 +46,28 @@ struct ursparse {
 //buff, sz   => input buffer to parse and its size
 //
 //out_sz     => output number of bytes consumed
-//out_offset => output value of uint
-//              valid only on 'done parsing' return value
+//data       => in/out parse state (value + started flag); must be the same
+//              instance for every call parsing one number. tracking "started"
+//              separately from the value matters because a value of 0 split
+//              at a buffer boundary must not be mistaken for "not started
+//              yet" (which would skip and eat the following separator)
 //
 //returns
 //  negative number on error
-//  0 done parsing, out_offset contains the parsed value
-//  n intermediate parsing, 
-//    need more data, 
-//    out_offset contains intermediate value, 
-int parse_uint(const char* buff, size_t sz, size_t* out_sz, off_t* out_n)
+//  0 done parsing, data->value contains the parsed value
+//  n intermediate parsing,
+//    need more data,
+//    data->value contains intermediate value,
+int parse_uint(const char* buff, size_t sz, size_t* out_sz, struct parse_uint_state_data* data)
 {
     if (!buff) return -1;
     if (!sz) return -2;
     if (!out_sz) return -3;
-    if (!out_n) return -4;
-    
+    if (!data) return -4;
+
     size_t i = 0;
 
-    if (!*out_n) {
+    if (!data->started) {
         //consume spaces and newlines before number
         for(; i < sz; ++i)
             if (!(buff[i] == ' ' || buff[i] == '\n' )) break;
@@ -64,12 +76,13 @@ int parse_uint(const char* buff, size_t sz, size_t* out_sz, off_t* out_n)
     for (; i < sz; ++i) {
         if (buff[i] >= '0' && buff[i] <= '9') {
             //numerals
+            data->started = 1;
             int d = buff[i] - '0';
-            if (*out_n > (OFF_MAX - d) / 10) {
+            if (data->value > (OFF_MAX - d) / 10) {
                 fprintf(stderr, "ERROR: number too large parsing offset\n");
                 return -1;
             }
-            *out_n = *out_n * 10 + d;
+            data->value = data->value * 10 + d;
             continue;
         }
 
@@ -219,7 +232,7 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         
     case PARSE_OFFSET:
 
-        r = parse_uint(buff, sz, out_sz, &(data->ursparse.offset));
+        r = parse_uint(buff, sz, out_sz, &data->ursparse.offset);
         if (r < 0) {
             fprintf(stderr, "ERROR: could not parse offset\n");
             data->state = PARSE_ERROR;
@@ -245,8 +258,10 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         data->state = PARSE_SIZE;
 
     case PARSE_SIZE:
-        
-        r = parse_uint(buff, sz, out_sz, &(data->ursparse.size));
+
+        //data->ursparse.size has its own started flag, so parse_uint still
+        //skips the space between the offset and the size
+        r = parse_uint(buff, sz, out_sz, &data->ursparse.size);
 
         if (r < 0) {
             fprintf(stderr, "ERROR: could not parse length\n");
@@ -288,9 +303,10 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
             return *out_sz;
         }
 
-        fprintf(stderr, "INFO: processing segment %ld %ld\n", data->ursparse.offset, data->ursparse.size);
+        fprintf(stderr, "INFO: processing segment %ld %ld\n",
+                data->ursparse.offset.value, data->ursparse.size.value);
 
-        r = do_hole(data->ursparse.offset);
+        r = do_hole(data->ursparse.offset.value);
         if (r < 0) {
             data->state = PARSE_ERROR;
             return -8;
@@ -300,14 +316,14 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
 
     case PARSE_MEAT:
 
-        if (sz == 0 && data->ursparse.size > 0) {
+        if (sz == 0 && data->ursparse.size.value > 0) {
             //the header consumed the rest of this buffer; the meat is still
             //to come, so report progress and wait for the next read
             *out_sz = extra_sz;
             return *out_sz;
         }
 
-        r = do_meat(buff, sz > data->ursparse.size ? data->ursparse.size : sz, out_sz);
+        r = do_meat(buff, sz > data->ursparse.size.value ? data->ursparse.size.value : sz, out_sz);
 
         if (r < 0) {
             fprintf(stderr, "ERROR: could not process meat\n");
@@ -315,16 +331,16 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
             return r;
         }
 
-        if (data->ursparse.size < *out_sz) {
+        if (data->ursparse.size.value < *out_sz) {
             fprintf(stderr, "ERROR: meat processor broken\n");
             data->state = PARSE_ERROR;
             return -7;
         }
 
-        data->ursparse.size -= *out_sz;
+        data->ursparse.size.value -= *out_sz;
         *out_sz += extra_sz;
 
-        if (!data->ursparse.size) {
+        if (!data->ursparse.size.value) {
             //reset parsing state
             memset(data, 0, sizeof(*data));
             return 0;
@@ -616,12 +632,18 @@ int byte_from_hex(char a, char b, unsigned char* byte)
 //returns the value on success, or -1 on overflow / trailing garbage / out of range
 int parse_block_size(const char* s)
 {
-    char* end = 0;
-    errno = 0;
-    long v = strtol(s, &end, 10);
-    if (errno || end == s || *end != '\0' || v < 2 || v > (1 << 30))
+    struct parse_uint_state_data pu = { 0, 0 };
+    size_t consumed = 0;
+    size_t len = strlen(s);
+
+    //reuse the stream integer parser; it stops at a space/newline (returns 0)
+    //or at end-of-buffer (returns >0), so a valid argument is one where the
+    //whole string was consumed as digits
+    int r = parse_uint(s, len, &consumed, &pu);
+    if (r < 0 || consumed != len || pu.value < 2 || pu.value > (1 << 30))
         return -1;
-    return (int)v;
+
+    return (int)pu.value;
 }
 
 int main(int argc, const char* argv[])
