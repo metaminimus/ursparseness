@@ -162,6 +162,13 @@ int do_meat(const char* buff, size_t sz, size_t* out_sz)
             return -4;
         }
 
+        if (0 == r) {
+            //write() accepted nothing though sz > 0; retrying would spin forever
+            fprintf(stderr, "ERROR: write to output file made no progress\n");
+            *out_sz = written_bytes;
+            return -4;
+        }
+
         written_bytes += r;
         sz -= r;
         buff += r;
