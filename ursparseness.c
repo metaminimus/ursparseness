@@ -14,6 +14,11 @@
 //the widest unsigned type, shifted right one, then narrowed to off_t
 #define OFF_MAX ((off_t)((~(uintmax_t)0) >> 1))
 
+//set by -q / --quiet: suppress the per-segment "INFO: processing segment"
+//lines. a fragmented image has millions of segments and one unbuffered
+//stderr write each floods the terminal and slows the transfer.
+static int g_quiet = 0;
+
 //EINTR-safe wrappers: a signal must not abort a transfer mid-stream
 static ssize_t read_eintr(int fd, void* buf, size_t n)
 {
@@ -384,8 +389,9 @@ int parse_ursparse(const char* buff, size_t sz, size_t* out_sz, struct ursparse_
         //new high-water mark, clamped so off+len can't overflow off_t
         data->prev_end = (len > OFF_MAX - off) ? OFF_MAX : off + len;
 
-        fprintf(stderr, "INFO: processing segment %jd %jd\n",
-                (intmax_t)off, (intmax_t)len);
+        if (!g_quiet)
+            fprintf(stderr, "INFO: processing segment %jd %jd\n",
+                    (intmax_t)off, (intmax_t)len);
 
         r = do_hole(fd_out, off);
         if (r < 0) {
@@ -599,7 +605,8 @@ int do_sparse_copy_data(int fd_in, int fd_out, off_t start, size_t sz)
 //emits one contiguous segment: the "offset length\n" header then the bytes
 int do_sparse_data(int fd_in, int fd_out, off_t start, size_t sz)
 {
-    fprintf(stderr, "INFO: processing segment %jd %zu\n", (intmax_t)start, sz);
+    if (!g_quiet)
+        fprintf(stderr, "INFO: processing segment %jd %zu\n", (intmax_t)start, sz);
 
     if (4 > dprintf(fd_out, "%jd %zu\n", (intmax_t)start, sz)) {
         perror("ERROR: could not write segment");
@@ -798,16 +805,16 @@ int usage(const char* name)
     fprintf(stderr, "USAGE: %s options < input_file [ > output_file ]\n", name);
     fprintf(stderr, "       -h,    --help      shows usage\n");
     fprintf(stderr, "       -v,    --version   shows version\n");
+    fprintf(stderr, "       -q,    --quiet     do not log every segment to stderr as it is processed\n");
     fprintf(stderr, "       -m,    --map       shows map of data blocks for sparse input file\n");
     fprintf(stderr, "       -u,    --ursparse  reads ursparse input file and writes sparse file to output (default option)\n");
     fprintf(stderr, "       -s,    --sparse    reads sparse input file and writes ursparse format to output file\n");
+    fprintf(stderr, "       -s00               treat data blocks that are all 0x00 as holes\n");
+    fprintf(stderr, "       -sFF               treat data blocks that are all 0xFF as holes\n");
+    fprintf(stderr, "       -sHH               treat data blocks that are all 0xHH as holes\n");
+    fprintf(stderr, "\n");
     fprintf(stderr, "       -bSIZE,--blocksize=SIZE block size in bytes (defaults to 4096)\n");
     fprintf(stderr, "       -MSIZE,--max-size=SIZE  abort -u expansion if meat+holes would exceed SIZE bytes\n");
-    fprintf(stderr, "\n");
-    fprintf(stderr, "       -sHH              like -s, but also treats any data block that is entirely\n");
-    fprintf(stderr, "                         byte 0xHH as a hole\n");
-    fprintf(stderr, "       -s00              treat data blocks that are all 0x00 as holes\n");
-    fprintf(stderr, "       -sFF              treat data blocks that are all 0xFF as holes\n");
 
     return 0;
 }
@@ -912,6 +919,7 @@ int main(int argc, const char* argv[])
             else if (!strcmp("map",      opt)) action = MAP;
             else if (!strcmp("ursparse", opt)) action = URSPARSE;
             else if (!strcmp("sparse",   opt)) action = SPARSE;
+            else if (!strcmp("quiet",    opt)) g_quiet = 1;
             else if (!strncmp("blocksize=", opt, sizeof("blocksize=")-1)) {
                 block_size = parse_block_size(opt + sizeof("blocksize=")-1);
                 block_size_given = 1;
@@ -939,6 +947,7 @@ int main(int argc, const char* argv[])
             else if (!strcmp("m", arg+1)) action = MAP;
             else if (!strcmp("u", arg+1)) action = URSPARSE;
             else if (!strcmp("s", arg+1)) action = SPARSE;
+            else if (!strcmp("q", arg+1)) g_quiet = 1;
             else if (arg[1] == 's' && arg[2] && arg[3] && !arg[4]) {
                 if (byte_from_hex(arg[2], arg[3], &hole_byte)) {
                     fprintf(stderr, "ERROR: invalid hole byte: %s\n", arg);
