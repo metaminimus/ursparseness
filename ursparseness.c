@@ -553,8 +553,8 @@ enum actions {
 int byte_from_char(char a)
 {
     if (a >= '0' && a <= '9') return a - '0';
-    if (a >= 'a' && a <= 'f') return a - 'a';
-    if (a >= 'A' && a <= 'F') return a - 'F';
+    if (a >= 'a' && a <= 'f') return a - 'a' + 10;
+    if (a >= 'A' && a <= 'F') return a - 'A' + 10;
     return -1;
 }
 
@@ -582,9 +582,9 @@ int main(int argc, const char* argv[])
                 if (!strcmp("map",      argv[i]+2)) { action = MAP; break; }
                 if (!strcmp("ursparse", argv[i]+2)) { action = URSPARSE; break; }
                 if (!strcmp("sparse",   argv[i]+2)) { action = SPARSE; break; }
-                if (!strcmp("blocksize=",  argv[i]+2)) { 
-                    block_size = atoi(argv[i]+sizeof("blocksize="));
-                    break; 
+                if (!strncmp("blocksize=", argv[i]+2, sizeof("blocksize=")-1)) {
+                    block_size = atoi(argv[i]+2 + sizeof("blocksize=")-1);
+                    break;
                 }
             } 
             else {
@@ -599,9 +599,9 @@ int main(int argc, const char* argv[])
                     }
                     action=SPARSE_XX; break; 
                 }
-                if (argv[i][1] == 'b') { 
-                    block_size = atoi(argv[i]+1);
-                    break; 
+                if (argv[i][1] == 'b') {
+                    block_size = atoi(argv[i]+2);
+                    break;
                 }
             }
         }
