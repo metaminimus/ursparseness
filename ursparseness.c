@@ -1,13 +1,14 @@
 #define _GNU_SOURCE
 #include <errno.h>
-#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 
-//largest value representable in off_t (two's complement signed type)
-#define OFF_MAX ((off_t)(~((off_t)1 << (sizeof(off_t) * CHAR_BIT - 1))))
+//largest value representable in off_t (a signed type in POSIX): all-ones in
+//the widest unsigned type, shifted right one, then narrowed to off_t
+#define OFF_MAX ((off_t)((~(uintmax_t)0) >> 1))
 
 //
 //ursparse file format
