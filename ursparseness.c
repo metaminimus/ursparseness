@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define VERSION "1.0"
@@ -555,6 +556,24 @@ int do_ursparse(int fd_in, int fd_out, size_t blk_sz, off_t max_size)
 
     free(read_buff);
 
+    //segments carry data only, so a stream ending in a hole leaves the output
+    //short: the final write landed before the file's true end. the parser has
+    //already tracked the high-water mark, so set the size explicitly. only a
+    //regular file can be sized this way - a block device is already a fixed
+    //size and ftruncate would fail on it.
+    if (!g_dry_run) {
+        struct stat st;
+        if (fstat(fd_out, &st) == -1) {
+            perror("ERROR: could not query output file");
+            return 8;
+        }
+        if (S_ISREG(st.st_mode)
+                && ftruncate(fd_out, data.totals.prev_end) == -1) {
+            perror("ERROR: could not set output file size");
+            return 8;
+        }
+    }
+
     if (g_dry_run)
         printf("dry run OK: %jd segment(s), %jd data byte(s), "
                "reconstructed size %jd byte(s)\n",
@@ -646,6 +665,13 @@ int do_sparse_copy_data(int fd_in, int fd_out, off_t start, off_t sz)
     return 0;
 }
 
+//offset just past the last segment emitted by do_sparse_data. every segment
+//the encoder writes goes through that one function, so this ends up holding
+//the stream's high-water mark whichever path produced it (plain -s or the
+//block-scanning -sHH). do_sparse compares it against the real file size to
+//decide whether a trailing hole still needs recording.
+static off_t g_last_seg_end = 0;
+
 //emits one contiguous segment: the "offset length\n" header then the bytes
 int do_sparse_data(int fd_in, int fd_out, off_t start, off_t sz)
 {
@@ -660,6 +686,8 @@ int do_sparse_data(int fd_in, int fd_out, off_t start, off_t sz)
     if (-1 == do_sparse_copy_data(fd_in, fd_out, start, sz)) {
         return -1;
     }
+
+    g_last_seg_end = start + sz;
     return 0;
 }
 
@@ -784,6 +812,23 @@ int do_sparse(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte)
             goto done;
         }
         start = end;
+    }
+
+    //a hole running to EOF has no data extent to emit, so nothing so far has
+    //recorded where the file actually ends and the decoder would reconstruct
+    //it short. a zero-length segment at the final size carries the size
+    //without carrying any bytes. -sHH needs this too: a trailing run of
+    //all-hole-byte blocks is dropped the same way.
+    off_t fsize = lseek(fd_in, 0, SEEK_END);
+    if (fsize == -1) {
+        perror("ERROR: could not determine input size");
+        ret = 1;
+        goto done;
+    }
+
+    if (fsize > g_last_seg_end && do_sparse_data(fd_in, fd_out, fsize, 0)) {
+        ret = 2;
+        goto done;
     }
 
 done:
