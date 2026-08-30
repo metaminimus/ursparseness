@@ -92,7 +92,11 @@ struct ursparse {
 //              separately from the value matters because a value of 0 split
 //              at a buffer boundary must not be mistaken for "not started
 //              yet" (which would skip and eat the following separator)
-//what       => noun for diagnostics ("offset", "length", "block size", ...)
+//what       => noun for diagnostics ("offset", "length", ...), or NULL to stay
+//              silent and let the caller report. the stream parser has no
+//              better context than this function does, so it wants the
+//              message; an argument parser knows the whole option string and
+//              reports that instead, and would otherwise print twice
 //
 //returns
 //  negative number on error
@@ -121,7 +125,8 @@ int parse_uint(const char* buff, size_t sz, size_t* out_sz, struct parse_uint_st
             data->started = 1;
             int d = buff[i] - '0';
             if (data->value > (OFF_MAX - d) / 10) {
-                fprintf(stderr, "ERROR: number too large parsing %s\n", what);
+                if (what)
+                    fprintf(stderr, "ERROR: number too large parsing %s\n", what);
                 return -1;
             }
             data->value = data->value * 10 + d;
@@ -134,7 +139,8 @@ int parse_uint(const char* buff, size_t sz, size_t* out_sz, struct parse_uint_st
             return 0; //done parsing
         }
 
-        fprintf(stderr, "ERROR: invalid char parsing %s: %c\n", what, buff[i]);
+        if (what)
+            fprintf(stderr, "ERROR: invalid char parsing %s: %c\n", what, buff[i]);
         return -1;
     }
 
@@ -787,11 +793,11 @@ int do_sparse(int fd_in, int fd_out, size_t blk_sz, unsigned char* hole_byte)
 
         end = lseek(fd_in, start, SEEK_HOLE);
 
+        //no ENXIO case here, unlike after SEEK_DATA above: SEEK_HOLE only
+        //reports ENXIO past EOF, and start came from a successful SEEK_DATA so
+        //it points at real data. every file has an implicit hole at EOF for
+        //SEEK_HOLE to land on, so a failure here is a genuine error
         if (end == -1) {
-            if (errno == ENXIO) {
-                 //EOF reached
-                 break;
-            }
             perror("ERROR: could not seek");
             ret = 1;
             goto done;
@@ -858,11 +864,11 @@ int do_map (int fd_in)
     
         end = lseek(fd_in, start, SEEK_HOLE);
 
+        //no ENXIO case here, unlike after SEEK_DATA above: SEEK_HOLE only
+        //reports ENXIO past EOF, and start came from a successful SEEK_DATA so
+        //it points at real data. every file has an implicit hole at EOF for
+        //SEEK_HOLE to land on, so a failure here is a genuine error
         if (end == -1) {
-            if (errno == ENXIO) {
-                 //EOF reached
-                 break;
-            }
             perror("ERROR: could not seek");
             return 1;
         }
@@ -949,8 +955,8 @@ int parse_block_size(const char* s)
 
     //reuse the stream integer parser; it stops at a space/newline (returns 0)
     //or at end-of-buffer (returns >0), so a valid argument is one where the
-    //whole string was consumed as digits
-    int r = parse_uint(s, len, &consumed, &pu, "block size");
+    //whole string was consumed as digits. NULL: the caller names the option
+    int r = parse_uint(s, len, &consumed, &pu, 0);
     if (r < 0 || consumed != len || pu.value < 2 || pu.value > (1 << 30))
         return -1;
 
@@ -965,7 +971,8 @@ off_t parse_size(const char* s)
     size_t consumed = 0;
     size_t len = strlen(s);
 
-    int r = parse_uint(s, len, &consumed, &pu, "max size");
+    //NULL: the caller names the option
+    int r = parse_uint(s, len, &consumed, &pu, 0);
     if (r < 0 || consumed != len)
         return -1;
 
@@ -1015,6 +1022,11 @@ int main(int argc, const char* argv[])
             else if (!strncmp("blocksize=", opt, sizeof("blocksize=")-1)) {
                 block_size = parse_block_size(opt + sizeof("blocksize=")-1);
                 block_size_given = 1;
+                if (block_size < 0) {
+                    fprintf(stderr, "ERROR: invalid block size: %s\n", arg);
+                    usage(argv[0]);
+                    return 3;
+                }
             }
             else if (!strncmp("max-size=", opt, sizeof("max-size=")-1)) {
                 max_size = parse_size(opt + sizeof("max-size=")-1);
@@ -1053,6 +1065,11 @@ int main(int argc, const char* argv[])
             else if (arg[1] == 'b') {
                 block_size = parse_block_size(arg + 2);
                 block_size_given = 1;
+                if (block_size < 0) {
+                    fprintf(stderr, "ERROR: invalid block size: %s\n", arg);
+                    usage(argv[0]);
+                    return 3;
+                }
             }
             else if (arg[1] == 'M') {
                 max_size = parse_size(arg + 2);
@@ -1095,11 +1112,6 @@ int main(int argc, const char* argv[])
     }
     if (block_size_given && action == MAP) {
         fprintf(stderr, "ERROR: -b/--blocksize has no effect with -m\n");
-        return 3;
-    }
-
-    if (block_size < 2) {
-        fprintf(stderr, "ERROR: invalid block size\n");
         return 3;
     }
 
