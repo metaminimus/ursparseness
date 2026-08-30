@@ -896,9 +896,9 @@ int do_map (int fd_in)
 
 int usage(const char* name)
 {
-    fprintf(stderr, "%s VERSION %s: ", name, VERSION);
+    fprintf(stderr, "%s VERSION %s: ", name ? name : "null", VERSION);
     fprintf(stderr, "Helper utility to encode/decode sparse files to/from ursparse format\n\n");
-    fprintf(stderr, "USAGE: %s options < input_file [ > output_file ]\n", name);
+    fprintf(stderr, "USAGE: %s options < input_file [ > output_file ]\n", name ? name : "null");
     fprintf(stderr, "       -h,    --help      shows usage\n");
     fprintf(stderr, "       -v,    --version   shows version\n");
     fprintf(stderr, "       -q,    --quiet     do not log every segment to stderr as it is processed\n");
